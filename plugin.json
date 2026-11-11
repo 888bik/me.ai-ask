@@ -1,0 +1,60 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LingCore/WinShun-plugins/main/schema/plugin.schema.json",
+  "manifest": 1,
+  "id": "me.ai-ask",
+  "name": {
+    "zh": "问 AI",
+    "en": "Ask AI"
+  },
+  "version": "1.2.1",
+  "description": {
+    "zh": "ai + 问题，回车直接出答案，答案流式显示",
+    "en": "Ask ai + question and get a streamed answer without opening a browser"
+  },
+  "author": "888bik",
+  "homepage": "https://github.com/888bik/me.ai-ask",
+  "license": "MIT",
+  "minWinShun": "0.12.0",
+  "settingsWindow": true,
+  "runtime": {
+    "mode": "resident",
+    "program": "python",
+    "script": "main.py",
+    "timeoutMs": 10000,
+    "debounceMs": 300,
+    "start": "eager"
+  },
+  "permissions": [
+    "network",
+    "ui",
+    "clipboard:read"
+  ],
+  "commands": [
+    {
+      "id": "ai",
+      "title": {
+        "zh": "问 AI",
+        "en": "Ask AI"
+      },
+      "description": {
+        "zh": "用默认厂商的模型回答问题",
+        "en": "Answer a question with the default vendor"
+      },
+      "keyword": "ai",
+      "hint": {
+        "zh": "输入问题，回车提问",
+        "en": "Type a question and press Enter"
+      },
+      "actions": [
+        {
+          "id": "copy",
+          "title": {
+            "zh": "复制答案",
+            "en": "Copy answer"
+          },
+          "key": "Enter"
+        }
+      ]
+    }
+  ]
+}
