@@ -74,7 +74,7 @@ class WindowThreadTests(unittest.TestCase):
         self.assertEqual(args[2], "")
         self.assertTrue(callable(args[3]))
 
-    def test_main_handler_passes_the_host_clipboard(self):
+    def test_main_handler_defers_the_host_clipboard_until_paste(self):
         plugin = _Plugin(str(self.dir))
         plugin.tool = mock.Mock(return_value={"items": [{"text": "sk-host", "kind": "text"}]})
 
@@ -85,8 +85,10 @@ class WindowThreadTests(unittest.TestCase):
         args = show.call_args.args
         self.assertEqual(args[0], str(self.dir))
         self.assertIs(args[1], main.refresh_settings_cache)
-        self.assertEqual(args[2], "sk-host")
-        self.assertTrue(callable(args[3]))
+        self.assertEqual(args[2], "")
+        plugin.tool.assert_not_called()
+
+        self.assertEqual(args[3](), "sk-host")
         plugin.tool.assert_called_once_with("clipboard_history", limit=1, kind="text", max_chars=20000)
 
 
@@ -201,6 +203,28 @@ class PageSwapTests(unittest.TestCase):
         window.ui["model"].set("my-custom-model")
         window._flush()
         self.assertEqual(window.draft.config["model_deepseek"], "my-custom-model")
+
+    def test_cloudflare_page_has_an_account_id_field(self):
+        window = self.make_window()
+        window.select(2)  # Cloudflare
+
+        self.assertIsNotNone(window.ui["cloudflare_account"])
+        self.assertEqual(window.ui["cloudflare_account"].get(), "")
+
+        window.ui["cloudflare_account"].set("acc-1")
+        window._flush()
+
+        self.assertEqual(window.draft.config["cloudflare_account_id"], "acc-1")
+
+    def test_probe_settings_include_the_cloudflare_account_id(self):
+        window = self.make_window()
+        window.select(2)
+        window.ui["key"].set("sk-test")
+        window.ui["cloudflare_account"].set("acc-2")
+
+        settings = window._probe_settings("cloudflare")
+
+        self.assertEqual(settings["cloudflare_account_id"], "acc-2")
 
     def test_key_survives_switching_pages_without_saving(self):
         window = self.make_window()
@@ -392,19 +416,20 @@ class PageSwapTests(unittest.TestCase):
 
         self.assertIn("me.ai-ask: clipboard", errors.getvalue())
 
-    def test_reopening_refreshes_the_snapshot_of_the_open_window(self):
+    def test_reopening_does_not_read_the_host_clipboard_again(self):
         window = self.make_window()
+        window.clipboard_text = "old-snapshot"
         self.addCleanup(settings_window._state.update, thread=None, root=None, window=None)
         settings_window._state.update(thread=_AliveThread(), root=window.root, window=window)
 
-        settings_window.show_window(str(self.dir), None, "sk-new")
+        settings_window.show_window(str(self.dir), None)
         window.root.update()
 
-        self.assertEqual(window.clipboard_text, "sk-new")
+        self.assertEqual(window.clipboard_text, "")
 
-    def test_window_is_topmost_and_stays_topmost_when_raised_again(self):
+    def test_window_is_not_pinned_above_other_apps(self):
         window = self.make_window()
-        self.assertEqual(window.root.attributes("-topmost"), 1)
+        self.assertEqual(window.root.attributes("-topmost"), 0)
 
         self.addCleanup(settings_window._state.update, thread=None, root=None)
         settings_window._state.update(thread=_AliveThread(), root=window.root)
@@ -412,7 +437,7 @@ class PageSwapTests(unittest.TestCase):
         settings_window.show_window(str(self.dir))
         window.root.update()
 
-        self.assertEqual(window.root.attributes("-topmost"), 1)
+        self.assertEqual(window.root.attributes("-topmost"), 0)
 
 
 if __name__ == "__main__":

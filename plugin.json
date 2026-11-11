@@ -6,10 +6,10 @@
     "zh": "问 AI",
     "en": "Ask AI"
   },
-  "version": "1.2.1",
+  "version": "1.2.4",
   "description": {
-    "zh": "ai + 问题，回车直接出答案，答案流式显示",
-    "en": "Ask ai + question and get a streamed answer without opening a browser"
+    "zh": "ai + 问题，回车提问，答案流式显示，答案出来后再回车复制全文",
+    "en": "Ask ai + question with Enter; the answer streams in; press Enter again to copy it"
   },
   "author": "888bik",
   "homepage": "https://github.com/888bik/me.ai-ask",
@@ -42,8 +42,8 @@
       },
       "keyword": "ai",
       "hint": {
-        "zh": "输入问题，回车提问",
-        "en": "Type a question and press Enter"
+        "zh": "输入问题，回车提问；答案出来后再回车复制全文",
+        "en": "Type a question and press Enter; press Enter again to copy the answer"
       },
       "actions": [
         {

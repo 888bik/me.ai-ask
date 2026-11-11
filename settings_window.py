@@ -97,7 +97,8 @@ def show_window(data_dir, on_saved=None, clipboard_text="", clipboard_reader=Non
 
 def _raise(root):
     try:
-        root.attributes("-topmost", True)
+        # Bring it forward once, but do not pin it above other apps.
+        root.attributes("-topmost", False)
         root.deiconify()
         root.lift()
         root.focus_force()
@@ -200,7 +201,6 @@ class _Window:
     # -- construction ---------------------------------------------------
     def _build(self):
         # Stay above Win顺's always-on-top launcher window.
-        self.root.attributes("-topmost", True)
         self.root.title("问 AI · 设置")
         self.root.geometry("780x470")
         self.root.minsize(660, 400)
@@ -306,6 +306,17 @@ class _Window:
         self.ui["model"] = model
         self.ui["model_combo"] = combo
 
+        if vendor == "cloudflare":
+            ttk.Label(self.right, text="Cloudflare 账号 ID").pack(anchor="w")
+            account = tk.StringVar(value=self.draft.config.get("cloudflare_account_id", ""))
+            ttk.Entry(self.right, textvariable=account).pack(fill="x", pady=(4, 2))
+            ttk.Label(
+                self.right,
+                text="Cloudflare 控制台右下角的 Account ID",
+                foreground="#666666",
+            ).pack(anchor="w", pady=(0, 12))
+            self.ui["cloudflare_account"] = account
+
         if vendor == "custom":
             ttk.Label(self.right, text="Base URL").pack(anchor="w")
             base = tk.StringVar(value=self.draft.config.get("base_url_custom", ""))
@@ -327,6 +338,11 @@ class _Window:
             return None
 
         settings = {"key_" + vendor: key, "model_" + vendor: model}
+        if vendor == "cloudflare":
+            account = (
+                self.ui["cloudflare_account"].get() if self.ui.get("cloudflare_account") else ""
+            )
+            settings["cloudflare_account_id"] = account.strip()
         if vendor == "custom":
             base = (self.ui["base"].get() if self.ui.get("base") else "").strip()
             if not base:
@@ -394,6 +410,10 @@ class _Window:
                 self.draft.config["model_" + vendor] = self.ui["model"].get().strip()
             if self.ui.get("base") is not None:
                 self.draft.config["base_url_custom"] = self.ui["base"].get().strip()
+            if self.ui.get("cloudflare_account") is not None:
+                self.draft.config["cloudflare_account_id"] = (
+                    self.ui["cloudflare_account"].get().strip()
+                )
             if self.ui.get("key") is not None:
                 value = self.ui["key"].get().strip()
                 if value:
@@ -480,4 +500,5 @@ def _blank_ui():
         "model": None,
         "model_combo": None,
         "base": None,
+        "cloudflare_account": None,
     }

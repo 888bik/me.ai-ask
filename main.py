@@ -1,11 +1,13 @@
 """me.ai-ask — Win顺 常驻插件。
 
-输入「ai + 空格 + 问题」回车，答案流式出现在结果列表里。
+输入「ai + 空格 + 问题」，回车提问，答案流式出现在结果列表里；
+答案出来后再回车复制全文。
 全部厂商走 OpenAI 兼容接口（POST {base_url}/chat/completions，stream: true）。
 只用标准库：urllib 发请求，json 解析 SSE。
 """
 
 import json
+import re
 import socket
 import sys
 import threading
@@ -26,6 +28,7 @@ VENDORS = store.VENDORS
 
 _settings_cache = {"data_dir": None, "settings": None}
 _settings_lock = threading.Lock()
+_pending = None
 
 
 def cached_settings(data_dir):
@@ -137,6 +140,15 @@ def vendor_config(settings, vendor):
     base = (settings.get("base_url_" + vendor) or preset["base"] or "").strip()
     model = (settings.get("model_" + vendor) or preset["model"] or "").strip()
     key = (settings.get("key_" + vendor) or "").strip()
+
+    if vendor == "cloudflare" and not base:
+        account_id = str(settings.get("cloudflare_account_id") or "").strip()
+        if not account_id:
+            raise AnswerError(
+                "config",
+                "请先在设置里填写 Cloudflare 账号 ID（Cloudflare 控制台右下角 Account ID）",
+            )
+        base = store.CLOUDFLARE_BASE_TEMPLATE.format(account_id=account_id)
 
     if not base:
         raise AnswerError("config", "先在插件设置里填自定义厂商的 Base URL")
@@ -315,7 +327,7 @@ def hint_row():
     return winshun.item(
         "ai-hint",
         "问 AI：ai + 空格 + 问题",
-        "回车提问；cf / ds / qw / kimi / glm / gpt 切换厂商",
+        "问题打完整后回车提问；cf/ds/qw/kimi/glm/gpt 切换厂商；答案出来后再回车复制全文",
         valid=False,
     )
 
@@ -327,16 +339,16 @@ def info_text(model, elapsed, tokens):
     return text
 
 
-def on_query(query, plugin):
-    settings = cached_settings(plugin.data_dir or winshun.data_dir())
-    default_vendor = settings.get("default_vendor") or DEFAULT_VENDOR
-    if default_vendor not in VENDORS:
-        default_vendor = DEFAULT_VENDOR
+def ask_row(vendor, question):
+    return winshun.item(
+        "ask",
+        "回车向 AI 提问",
+        _short(question),
+        data={"vendor": vendor, "question": question},
+    )
 
-    vendor, question = parse_input(query.text, default_vendor)
-    if not question:
-        return [hint_row()]
 
+def _answer_rows(settings, question, vendor, query, plugin):
     def emit(partial_text, thinking):
         if thinking:
             rows = [
@@ -361,8 +373,59 @@ def on_query(query, plugin):
     ]
 
 
+def on_query(query, plugin):
+    global _pending
+    settings = cached_settings(plugin.data_dir or winshun.data_dir())
+    default_vendor = settings.get("default_vendor") or DEFAULT_VENDOR
+    if default_vendor not in VENDORS:
+        default_vendor = DEFAULT_VENDOR
+
+    vendor, question = parse_input(query.text, default_vendor)
+    if not question:
+        return [hint_row()]
+
+    if _pending is not None:
+        pending = _pending
+        _pending = None
+        if pending.get("vendor") == vendor and pending.get("question") == question:
+            return _answer_rows(settings, question, vendor, query, plugin)
+
+    # No request here: Enter sends the action, which writes _pending and
+    # refreshes; rerun=2 is the fallback if that refresh is missed.
+    return {"items": [ask_row(vendor, question)], "rerun": 2}
+
+
 def on_action(request, plugin):
+    global _pending
     item = request.item or {}
+    item_id = str(item.get("id", ""))
+
+    if item_id == "ask":
+        data = item.get("data") or {}
+        vendor = str(data.get("vendor") or "")
+        question = str(data.get("question") or "")
+
+        settings = cached_settings(plugin.data_dir or winshun.data_dir())
+        default_vendor = settings.get("default_vendor") or DEFAULT_VENDOR
+        if default_vendor not in VENDORS:
+            default_vendor = DEFAULT_VENDOR
+
+        text = (request.text or "").strip()
+        if text:
+            text = re.sub(r"^\s*ai(?=\s|$)\s*", "", text, flags=re.IGNORECASE).strip()
+            parsed_vendor, parsed_question = parse_input(text, default_vendor)
+            if parsed_question:
+                vendor, question = parsed_vendor, parsed_question
+
+        if vendor not in VENDORS:
+            vendor = default_vendor
+        if not question:
+            return [winshun.keep()]
+
+        _pending = {"vendor": vendor, "question": question}
+        plugin.refresh()
+        return [winshun.keep()]
+
     text = item.get("copy") or item.get("title") or ""
     return [winshun.copy(text), winshun.hide()]
 
@@ -411,7 +474,7 @@ def on_show_settings(plugin):
     settings_window.show_window(
         plugin.data_dir or winshun.data_dir(),
         refresh_settings_cache,
-        _host_clipboard(plugin),
+        "",
         lambda: _host_clipboard(plugin),
     )
 

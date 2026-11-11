@@ -12,10 +12,12 @@ import json
 import os
 from ctypes import wintypes
 
+CLOUDFLARE_BASE_TEMPLATE = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
+
 VENDORS = {
     "cloudflare": {
         "name": "Cloudflare Workers AI",
-        "base": "https://api.cloudflare.com/client/v4/accounts/a23e8c24e1fd235c35b97761a8d31697/ai/v1",
+        "base": "",
         "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
         "models": [
             "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
@@ -70,6 +72,7 @@ DEFAULT_CONFIG = {
     "default_vendor": "deepseek",
     "system_prompt": SYSTEM_PROMPT_DEFAULT,
     "base_url_custom": "",
+    "cloudflare_account_id": "",
 }
 for _vendor, _spec in VENDORS.items():
     DEFAULT_CONFIG["model_" + _vendor] = _spec["model"]

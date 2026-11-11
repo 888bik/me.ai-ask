@@ -57,9 +57,13 @@ class FakePlugin:
         self.data_dir = data_dir
         self.settings = settings or {}
         self.partials = []
+        self.refreshes = []
 
     def partial(self, query_id, items, replace_all=False):
         self.partials.append((query_id, list(items), replace_all))
+
+    def refresh(self):
+        self.refreshes.append(True)
 
     def log(self, text, level="info"):
         pass
@@ -86,11 +90,37 @@ class EndpointTests(unittest.TestCase):
             "https://api.deepseek.com/v1/chat/completions",
         )
 
-    def test_cloudflare_preset_has_account_id(self):
-        self.assertIn("/accounts/a23e8c24e1fd235c35b97761a8d31697/ai/v1", main.VENDORS["cloudflare"]["base"])
+    def test_cloudflare_preset_uses_an_account_id_template(self):
+        self.assertEqual(main.VENDORS["cloudflare"]["base"], "")
+        self.assertEqual(
+            store.CLOUDFLARE_BASE_TEMPLATE,
+            "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+        )
+
+    def test_cloudflare_base_is_built_from_the_setting(self):
+        base, _model, _key = main.vendor_config(
+            {
+                "key_cloudflare": "sk-test",
+                "model_cloudflare": "cf-model",
+                "cloudflare_account_id": "acc123",
+            },
+            "cloudflare",
+        )
+
+        self.assertEqual(
+            base, "https://api.cloudflare.com/client/v4/accounts/acc123/ai/v1"
+        )
+
+    def test_cloudflare_without_account_id_is_an_explicit_error(self):
+        with self.assertRaises(main.AnswerError) as caught:
+            main.vendor_config(
+                {"key_cloudflare": "sk-test", "model_cloudflare": "cf-model"}, "cloudflare"
+            )
+
+        self.assertIn("Cloudflare 账号 ID", caught.exception.message)
 
     def test_every_preset_has_base_and_model(self):
-        for key in ("cloudflare", "deepseek", "qwen", "kimi", "glm", "openai"):
+        for key in ("deepseek", "qwen", "kimi", "glm", "openai"):
             with self.subTest(vendor=key):
                 self.assertTrue(main.VENDORS[key]["base"].startswith("https://"))
                 self.assertTrue(main.VENDORS[key]["model"])
@@ -194,7 +224,11 @@ class AnswerErrorTests(unittest.TestCase):
 
         with mock.patch("main._urlopen", side_effect=error):
             with self.assertRaises(main.AnswerError) as caught:
-                main.answer(settings_with_key("cloudflare"), "你好", "cloudflare")
+                main.answer(
+                    settings_with_key("cloudflare", cloudflare_account_id="acc-1"),
+                    "你好",
+                    "cloudflare",
+                )
 
         self.assertIn("Account quota exceeded", caught.exception.message)
 
@@ -332,6 +366,7 @@ class IdleTimeoutTests(unittest.TestCase):
 
 class ReasonerTests(unittest.TestCase):
     def setUp(self):
+        main._pending = None
         self.data_dir = make_data_dir()
         self.addCleanup(shutil.rmtree, self.data_dir, True)
         store.save_config(self.data_dir, {"default_vendor": "deepseek", "model_deepseek": "deepseek-reasoner"})
@@ -339,6 +374,7 @@ class ReasonerTests(unittest.TestCase):
     def test_reasoning_is_thinking_but_never_part_of_the_answer(self):
         plugin = FakePlugin(data_dir=str(self.data_dir))
         query = main.winshun.Query(text="9.11 和 9.9 谁大", command="ai", trigger="keyword", keyword="ai", query_id=3)
+        main._pending = {"vendor": "deepseek", "question": "9.11 和 9.9 谁大"}
         lines = [
             sse_reasoning("先比较整数部分"),
             sse_reasoning("再比较小数部分"),
@@ -359,6 +395,7 @@ class ReasonerTests(unittest.TestCase):
 
 class QueryRowTests(unittest.TestCase):
     def setUp(self):
+        main._pending = None
         self.data_dir = make_data_dir()
         self.addCleanup(shutil.rmtree, self.data_dir, True)
         store.save_config(self.data_dir, {"default_vendor": "deepseek"})
@@ -366,24 +403,53 @@ class QueryRowTests(unittest.TestCase):
     def plugin(self):
         return FakePlugin(data_dir=str(self.data_dir))
 
-    def run_query(self, query, key="sk-test"):
+    def query(self, text):
+        return main.winshun.Query(text=text, command="ai", trigger="keyword", keyword="ai", query_id=1)
+
+    def run_query(self, query, key="sk-test", plugin=None):
+        plugin = plugin or self.plugin()
         with mock.patch("store.read_secret", return_value=key):
-            return main.on_query(query, self.plugin())
+            return main.on_query(query, plugin)
+
+    def answered_query(self, query, key="sk-test", plugin=None):
+        """Placeholder -> Enter action -> refreshed query, like Win顺 does."""
+        plugin = plugin or self.plugin()
+        first = self.run_query(query, key=key, plugin=plugin)
+        if isinstance(first, dict):
+            main._pending = first["items"][0]["data"]
+            return self.run_query(query, key=key, plugin=plugin), plugin
+        return first, plugin
 
     def test_hint_row_when_nothing_was_typed(self):
-        query = main.winshun.Query(text="", command="ai", trigger="keyword", keyword="ai", query_id=1)
-
-        items = self.run_query(query)
+        items = self.run_query(self.query(""))
 
         self.assertEqual(len(items), 1)
         self.assertFalse(items[0]["valid"])
 
+    def test_hint_row_describes_enter_to_ask(self):
+        row = main.hint_row()
+
+        self.assertIn("回车提问", row["subtitle"])
+        self.assertNotIn("自动提问", row["subtitle"])
+        self.assertNotIn("1.2", row["subtitle"])
+
+    def test_non_empty_query_returns_only_a_placeholder(self):
+        with mock.patch("main._urlopen") as fake:
+            result = self.run_query(self.query("你好"))
+
+        fake.assert_not_called()
+        self.assertEqual(result["rerun"], 2)
+        item = result["items"][0]
+        self.assertEqual(item["id"], "ask")
+        self.assertNotEqual(item.get("valid"), False)
+        self.assertEqual(item["data"], {"vendor": "deepseek", "question": "你好"})
+
     def test_answer_row_then_info_row(self):
-        query = main.winshun.Query(text="你好", command="ai", trigger="keyword", keyword="ai", query_id=1)
+        query = self.query("你好")
         lines = [sse_delta("你好呀"), "data: [DONE]"]
 
         with mock.patch("main._urlopen", return_value=FakeResponse(lines)):
-            items = self.run_query(query)
+            items, _plugin = self.answered_query(query)
 
         self.assertEqual(items[0]["title"], "你好呀")
         self.assertEqual(items[0]["copy"], "你好呀")
@@ -392,21 +458,21 @@ class QueryRowTests(unittest.TestCase):
         self.assertIn("deepseek-chat", items[1]["title"])
 
     def test_missing_key_becomes_a_valid_false_hint(self):
-        query = main.winshun.Query(text="你好", command="ai", trigger="keyword", keyword="ai", query_id=1)
+        query = self.query("你好")
 
         with mock.patch("main._urlopen") as fake:
-            items = self.run_query(query, key="")
+            items, _plugin = self.answered_query(query, key="")
 
         fake.assert_not_called()
         self.assertFalse(items[0]["valid"])
         self.assertIn("API Key", items[0]["title"])
 
     def test_http_error_becomes_a_valid_false_row(self):
-        query = main.winshun.Query(text="你好", command="ai", trigger="keyword", keyword="ai", query_id=1)
+        query = self.query("你好")
         error = urllib.error.HTTPError("https://x", 429, "Too Many Requests", {}, None)
 
         with mock.patch("main._urlopen", side_effect=error):
-            items = self.run_query(query)
+            items, _plugin = self.answered_query(query)
 
         self.assertFalse(items[0]["valid"])
         self.assertIn("429", items[0]["title"])
@@ -416,21 +482,35 @@ class QueryRowTests(unittest.TestCase):
         query = main.winshun.Query(text="你好", command="ai", trigger="keyword", keyword="ai", query_id=7)
         lines = [sse_delta("一"), sse_delta("二"), "data: [DONE]"]
 
-        with mock.patch("main._urlopen", return_value=FakeResponse(lines)), \
-                mock.patch("store.read_secret", return_value="sk-test"):
-            main.on_query(query, plugin)
+        with mock.patch("main._urlopen", return_value=FakeResponse(lines)):
+            self.answered_query(query, plugin=plugin)
 
         self.assertTrue(plugin.partials)
         self.assertTrue(all(call[0] == 7 for call in plugin.partials))
 
     def test_inline_prefix_picks_the_vendor(self):
-        query = main.winshun.Query(text="cf 你好", command="ai", trigger="keyword", keyword="ai", query_id=1)
+        query = self.query("cf 你好")
+        store.save_config(
+            self.data_dir,
+            {"default_vendor": "deepseek", "cloudflare_account_id": "acc-9"},
+        )
 
         with mock.patch("main._urlopen", return_value=FakeResponse([sse_delta("x"), "data: [DONE]"])) as fake:
-            self.run_query(query)
+            self.answered_query(query)
 
         request = fake.call_args.args[0]
         self.assertIn("api.cloudflare.com", request.full_url)
+        self.assertIn("/accounts/acc-9/", request.full_url)
+
+    def test_cloudflare_without_account_id_makes_no_request(self):
+        query = self.query("cf 你好")
+
+        with mock.patch("main._urlopen") as fake:
+            items, _plugin = self.answered_query(query)
+
+        fake.assert_not_called()
+        self.assertFalse(items[0]["valid"])
+        self.assertIn("Cloudflare 账号 ID", items[0]["title"])
 
     def test_action_copies_the_answer(self):
         request = main.winshun.ActionRequest(
@@ -441,6 +521,85 @@ class QueryRowTests(unittest.TestCase):
 
         self.assertEqual(effects[0], main.winshun.copy("答案全文"))
         self.assertIn({"type": "hide"}, effects)
+
+
+class EnterAskTests(QueryRowTests):
+    def ask_action(self, vendor="deepseek", question="你好", text=""):
+        return main.winshun.ActionRequest(
+            action="default",
+            item={"id": "ask", "data": {"vendor": vendor, "question": question}},
+            text=text,
+        )
+
+    def test_enter_stores_the_question_and_calls_refresh(self):
+        plugin = self.plugin()
+
+        effects = main.on_action(self.ask_action(question="你好"), plugin)
+
+        self.assertIn({"type": "keep"}, effects)
+        self.assertEqual(main._pending, {"vendor": "deepseek", "question": "你好"})
+        self.assertEqual(plugin.refreshes, [True])
+
+    def test_pending_query_answers_once_then_returns_to_placeholder(self):
+        plugin = self.plugin()
+        query = self.query("你好")
+        with mock.patch("store.read_secret", return_value="sk-test"):
+            main.on_action(self.ask_action(question="你好"), plugin)
+        lines = [sse_delta("ok"), "data: [DONE]"]
+
+        with mock.patch("main._urlopen", return_value=FakeResponse(lines)) as fake:
+            items = self.run_query(query, plugin=plugin)
+
+        self.assertEqual(len(fake.call_args_list), 1)
+        self.assertEqual(items[0]["title"], "ok")
+
+        with mock.patch("main._urlopen") as again:
+            result = self.run_query(query, plugin=plugin)
+
+        again.assert_not_called()
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["items"][0]["id"], "ask")
+
+    def test_typing_without_enter_never_sends_a_request(self):
+        plugin = self.plugin()
+
+        for text in ("你", "你好", "你好呀"):
+            with mock.patch("main._urlopen") as fake:
+                result = self.run_query(self.query(text), plugin=plugin)
+            fake.assert_not_called()
+            self.assertIsInstance(result, dict)
+
+    def test_enter_reparses_the_latest_input_text(self):
+        plugin = self.plugin()
+
+        main.on_action(self.ask_action(question="旧问题", text="ai 新问题"), plugin)
+
+        self.assertEqual(main._pending, {"vendor": "deepseek", "question": "新问题"})
+
+    def test_enter_text_can_switch_the_vendor(self):
+        plugin = self.plugin()
+
+        main.on_action(self.ask_action(question="旧问题", text="ai cf 新问题"), plugin)
+
+        self.assertEqual(main._pending, {"vendor": "cloudflare", "question": "新问题"})
+
+    def test_enter_with_empty_text_falls_back_to_item_data(self):
+        plugin = self.plugin()
+
+        main.on_action(self.ask_action(question="来自占位", text=""), plugin)
+
+        self.assertEqual(main._pending, {"vendor": "deepseek", "question": "来自占位"})
+
+    def test_a_new_question_drops_the_pending_one_without_http(self):
+        plugin = self.plugin()
+        main._pending = {"vendor": "deepseek", "question": "旧问题"}
+
+        with mock.patch("main._urlopen") as fake:
+            result = self.run_query(self.query("新问题"), plugin=plugin)
+
+        fake.assert_not_called()
+        self.assertIsNone(main._pending)
+        self.assertEqual(result["items"][0]["data"]["question"], "新问题")
 
 
 class SettingsCacheTests(unittest.TestCase):
@@ -497,6 +656,23 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(caught.exception.kind, "http")
         self.assertIn("401", caught.exception.message)
 
+    def test_probe_uses_the_cloudflare_account_id(self):
+        response = FakeResponse([json.dumps({"model": "cf-model", "choices": []}).encode("utf-8")])
+        settings = settings_with_key("cloudflare", cloudflare_account_id="acc-42")
+
+        with mock.patch("main._urlopen", return_value=response) as fake:
+            main.probe(settings, "cloudflare")
+
+        self.assertIn("/accounts/acc-42/ai/v1", fake.call_args.args[0].full_url)
+
+    def test_probe_without_cloudflare_account_id_makes_no_request(self):
+        with mock.patch("main._urlopen") as fake:
+            with self.assertRaises(main.AnswerError) as caught:
+                main.probe(settings_with_key("cloudflare"), "cloudflare")
+
+        fake.assert_not_called()
+        self.assertIn("Cloudflare 账号 ID", caught.exception.message)
+
     def test_probe_maps_timeout(self):
         with mock.patch("main._urlopen", side_effect=socket.timeout()):
             with self.assertRaises(main.AnswerError) as caught:
@@ -514,6 +690,11 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(self.manifest["id"], "me.ai-ask")
         self.assertEqual(self.manifest["id"], os.path.basename(HERE))
 
+    def test_identity(self):
+        self.assertEqual(self.manifest["id"], "me.ai-ask")
+        self.assertEqual(self.manifest["id"], os.path.basename(HERE))
+        self.assertEqual(self.manifest["version"], "1.2.4")
+
     def test_permissions_are_network_ui_and_clipboard_read(self):
         self.assertEqual(sorted(self.manifest["permissions"]), ["clipboard:read", "network", "ui"])
 
@@ -523,6 +704,15 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(runtime["timeoutMs"], 10000)
         self.assertEqual(runtime["debounceMs"], 300)
         self.assertEqual(runtime["start"], "eager")
+
+    def test_copy_matches_enter_to_ask(self):
+        description = self.manifest["description"]
+        hint = self.manifest["commands"][0]["hint"]
+        for text in (description["zh"], description["en"], hint["zh"], hint["en"]):
+            self.assertNotIn("自动提问", text)
+            self.assertNotIn("停顿 1.2 秒", text)
+        self.assertIn("回车", description["zh"])
+        self.assertIn("回车", hint["zh"])
 
     def test_declares_the_ai_keyword(self):
         self.assertEqual(self.manifest["commands"][0]["keyword"], "ai")
@@ -672,18 +862,36 @@ class ResidentEndToEndTest(unittest.TestCase):
         reply = self.plugin.receive()
         self.assertEqual(reply["result"]["protocolVersion"], "1")
 
-    def test_query_streams_partials_and_returns_the_answer(self):
+    def test_query_waits_for_enter_then_streams_the_answer(self):
         self.initialize()
+        query_message = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "query",
+            "params": {"queryId": 5, "command": "ai", "trigger": "keyword", "keyword": "ai", "text": "你好", "raw": "ai 你好"},
+        }
+
+        self.plugin.send(query_message)
+        first, _seen = self.plugin.receive_until(2)
+        placeholder = first["result"]["items"][0]
+        self.assertEqual(placeholder["id"], "ask")
+        self.assertEqual(first["result"]["rerun"], 2)
 
         self.plugin.send(
             {
                 "jsonrpc": "2.0",
-                "id": 2,
-                "method": "query",
-                "params": {"queryId": 5, "command": "ai", "trigger": "keyword", "keyword": "ai", "text": "你好", "raw": "ai 你好"},
+                "id": 3,
+                "method": "action",
+                "params": {"action": "default", "item": placeholder, "text": "ai 你好"},
             }
         )
-        reply, seen = self.plugin.receive_until(2)
+        action_reply, action_seen = self.plugin.receive_until(3)
+        self.assertIn({"type": "keep"}, action_reply["result"]["effects"])
+        self.assertTrue([m for m in action_seen if m.get("method") == "winshun/refresh"])
+
+        refreshed = dict(query_message, id=4)
+        self.plugin.send(refreshed)
+        reply, seen = self.plugin.receive_until(4)
 
         items = reply["result"]["items"]
         self.assertEqual(items[0]["title"], "你好，世界")
